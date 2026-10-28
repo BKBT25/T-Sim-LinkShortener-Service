@@ -23,4 +23,4 @@ RATE_LIMIT_PER_MINUTE = "20"
 # y pega aquí el id que devuelve.
 [[kv_namespaces]]
 binding = "LINKS"
-id = "PENDIENTE_DE_CREAR"
+id = "a4864a72e5d747fd9baa745579cd9b1a"

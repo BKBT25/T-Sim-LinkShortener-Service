@@ -82,6 +82,17 @@ npm test
 
 Las pruebas usan un KV en memoria: no necesitan red ni credenciales.
 
+## Problemas comunes
+
+| Síntoma | Causa y solución |
+|---|---|
+| `curl : No se puede crear un canal seguro SSL/TLS…` en **PowerShell** | En Windows PowerShell `curl` es un alias de `Invoke-WebRequest` (usa TLS 1.0). Usa **`curl.exe`**, o antes de `Invoke-RestMethod`: `[Net.ServicePointManager]::SecurityProtocol = 'Tls12'` |
+| `curl: (35) schannel: SEC_E_ILLEGAL_MESSAGE` justo tras desplegar | El **certificado del dominio propio aún se está emitiendo** (de segundos a minutos): el DNS ya resuelve pero el handshake falla. Espera y reintenta; el estado se ve en *Worker → Settings → Domains & Routes* |
+| `Could not create custom domain` al desplegar | La zona `tlanextlilabs.com` no está en la **misma cuenta** de Cloudflare |
+| 500 al acortar / `KV namespace … not found` | Falta pegar en `wrangler.toml` el `id` real de `npx wrangler kv namespace create LINKS` |
+| El navegador bloquea el `POST` (CORS) | El origen de la app no está en `APP_ORIGINS` (debe incluir el dominio exacto, con `https://`) |
+| `401` al desplegar | `npx wrangler login` con la cuenta correcta |
+
 ## Coste
 
 Free tier de Workers + KV: 100 000 peticiones/día y 1 000 escrituras KV/día
