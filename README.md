@@ -12,12 +12,19 @@ Worker de **Cloudflare** que acorta los enlaces autónomos de
 
 | Ruta | Respuesta |
 |---|---|
-| `POST /api/shorten` `{ url }` | `201 { code, short, expiresAt, ttlSeconds }` |
+| `GET /api/shorten?url=<enlace>` | `200 { exists: true, code, short, expiresAt }` si ya existe; `404 { exists: false, code }` si no. **No escribe nada** |
+| `POST /api/shorten` `{ url }` | `201 { created: true, … }` si es nuevo; `200 { created: false, exists: true, … }` si ya existía (no reescribe ni reinicia la caducidad) |
 | `GET /s/:code` | `302` al enlace largo (`no-store`, `no-referrer`, `noindex`) |
 | `GET /health` | `200 { ok: true, service, ttlSeconds }` |
 | `GET /` | `302` a la app |
 
 `POST /api/shorten` acepta también `{ payload: "#p=…" }` como atajo.
+
+**Sin duplicados**: el código se deriva de `sha256(enlace)`, así que el mismo
+circuito produce siempre el mismo código. La consulta previa (`GET`) permite a la
+app mostrar el enlace existente sin crear otro, y el `POST` reutiliza la entrada
+en lugar de reescribirla. En KV se guarda `{"u": "<enlace>", "e": "<caducidad>"}`
+(se siguen leyendo las entradas antiguas, que guardaban solo la URL).
 
 ## Puesta en marcha
 

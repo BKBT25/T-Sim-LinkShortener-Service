@@ -76,8 +76,7 @@ describe('acortador de enlaces de T-Sim', () => {
     const created = (await (await handle(shortenRequest(LONG_LINK), env)).json()) as { code: string };
     const response = await handle(redirectRequest(created.code), env);
     expect(response.status).toBe(302);
-    expect(response.headers.get('Location')).toBe(new URL(LONG_LINK).toString());
-    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('Location')).toBe(new URL(LONG_LINK).toString());    expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
   });
 
@@ -128,9 +127,12 @@ describe('acortador de enlaces de T-Sim', () => {
   it('limita las peticiones por IP', async () => {
     const env = makeEnv({ RATE_LIMIT_PER_MINUTE: '2' });
     expect((await handle(shortenRequest(LONG_LINK), env)).status).toBe(201);
-    expect((await handle(shortenRequest(LONG_LINK), env)).status).toBe(201);
+    // La segunda reutiliza el enlace existente, pero también cuenta para el límite.
+    expect((await handle(shortenRequest(LONG_LINK), env)).status).toBe(200);
     expect((await handle(shortenRequest(LONG_LINK), env)).status).toBe(429);
-    expect((await handle(shortenRequest(LONG_LINK, '5.6.7.8'), env)).status).toBe(201);
+    // Otra IP no está limitada y, con otro circuito, crea uno nuevo.
+    const otherLink = `${APP}/#p=z${'ZzY9_-QwE'.repeat(4)}`;
+    expect((await handle(shortenRequest(otherLink, '5.6.7.8'), env)).status).toBe(201);
   });
 
   it('un código inexistente o inválido da 404', async () => {
@@ -182,5 +184,86 @@ describe('acortador de enlaces de T-Sim', () => {
     const response = await handle(new Request('https://go.t-sim.tlanextlilabs.com/'), env);
     expect(response.status).toBe(302);
     expect(response.headers.get('Location')).toBe(`${APP}/`);
+  });
+});
+
+function lookupRequest(url: string, origin = APP): Request {
+  const params = new URLSearchParams({ url });
+  return new Request(`https://go.t-sim.tlanextlilabs.com/api/shorten?${params.toString()}`, {
+    method: 'GET',
+    headers: { origin },
+  });
+}
+
+describe('sin duplicados del mismo circuito', () => {
+  it('la consulta previa responde 404 si todavía no existe', async () => {
+    const env = makeEnv();
+    const response = await handle(lookupRequest(LONG_LINK), env);
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { exists: boolean; code: string };
+    expect(body.exists).toBe(false);
+    expect(body.code).toBe(await codeForLink(new URL(LONG_LINK).toString()));
+  });
+
+  it('después de crearlo, la consulta lo encuentra', async () => {
+    const env = makeEnv();
+    const created = (await (await handle(shortenRequest(LONG_LINK), env)).json()) as {
+      code: string;
+      expiresAt: string;
+    };
+    const response = await handle(lookupRequest(LONG_LINK), env);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      exists: boolean;
+      created: boolean;
+      code: string;
+      short: string;
+      expiresAt: string;
+    };
+    expect(body.exists).toBe(true);
+    expect(body.created).toBe(false);
+    expect(body.code).toBe(created.code);
+    expect(body.short).toBe(`https://go.t-sim.tlanextlilabs.com/s/${created.code}`);
+    expect(body.expiresAt).toBe(created.expiresAt);
+  });
+
+  it('crear dos veces el mismo contenido reutiliza el enlace y no reescribe KV', async () => {
+    const env = makeEnv();
+    const first = await handle(shortenRequest(LONG_LINK), env);
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { code: string; created: boolean; expiresAt: string };
+    expect(firstBody.created).toBe(true);
+
+    const writesAfterFirst = [...env.LINKS.store.keys()].filter((key) => key.startsWith('link:')).length;
+    const second = await handle(shortenRequest(LONG_LINK, '3.3.3.3'), env);
+    expect(second.status).toBe(200);
+    const secondBody = (await second.json()) as { code: string; created: boolean; expiresAt: string };
+    expect(secondBody.code).toBe(firstBody.code);
+    expect(secondBody.created).toBe(false);
+    expect(secondBody.expiresAt).toBe(firstBody.expiresAt);
+    // Un solo registro y con la caducidad original (no se reinicia).
+    const keys = [...env.LINKS.store.keys()].filter((key) => key.startsWith('link:'));
+    expect(keys).toHaveLength(writesAfterFirst);
+    expect(env.LINKS.store.get(`link:${firstBody.code}`)?.expirationTtl).toBe(2592000);
+  });
+
+  it('la consulta rechaza enlaces ajenos o sin hash', async () => {
+    const env = makeEnv();
+    expect((await handle(lookupRequest('https://evil.example/#p=zAbC123_-XyZ'), env)).status).toBe(400);
+    expect((await handle(lookupRequest(`${APP}/`), env)).status).toBe(400);
+  });
+
+  it('sigue leyendo enlaces guardados con el formato antiguo (URL en texto)', async () => {
+    const env = makeEnv();
+    const code = await codeForLink(new URL(LONG_LINK).toString());
+    env.LINKS.store.set(`link:${code}`, { value: new URL(LONG_LINK).toString() });
+    const response = await handle(redirectRequest(code), env);
+    expect(response.status).toBe(302);
+    expect(response.headers.get('Location')).toBe(new URL(LONG_LINK).toString());
+    const lookup = await handle(lookupRequest(LONG_LINK), env);
+    expect(lookup.status).toBe(200);
+    const body = (await lookup.json()) as { exists: boolean; expiresAt: string };
+    expect(body.exists).toBe(true);
+    expect(body.expiresAt).toBe('');
   });
 });

@@ -67,7 +67,7 @@ function corsHeaders(env: Env, request?: Request): Record<string, string> {
   const allow = allowed.includes(origin) ? origin : allowed[0] ?? '';
   return {
     'Access-Control-Allow-Origin': allow,
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'content-type',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
@@ -116,6 +116,68 @@ function sameOriginTarget(raw: string, env: Env): string | null {
   return parsed.toString();
 }
 
+interface StoredLink {
+  /** Enlace largo (autónomo). */
+  u: string;
+  /** Caducidad en ISO. */
+  e: string;
+}
+
+/** Lee una entrada de KV, aceptando el formato antiguo (URL en texto plano). */
+async function readLink(key: string, env: Env): Promise<StoredLink | null> {
+  const raw = await env.LINKS.get(key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<StoredLink>;
+    if (typeof parsed.u === 'string' && parsed.u !== '') {
+      return { u: parsed.u, e: typeof parsed.e === 'string' ? parsed.e : '' };
+    }
+  } catch {
+    // Formato antiguo: el valor era la propia URL.
+  }
+  return { u: raw, e: '' };
+}
+
+function shortUrl(request: Request, code: string): string {
+  return `${new URL(request.url).origin}/s/${code}`;
+}
+
+/** `GET /api/shorten?url=…`: ¿existe ya un enlace corto para este enlace? */
+export async function handleLookup(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const candidate = url.searchParams.get('url') ?? '';
+  const target = sameOriginTarget(candidate, env);
+  if (!target) {
+    return json(
+      {
+        error:
+          'Solo se consultan enlaces de T-Sim con el circuito en el hash (#p=…). Comprueba que APP_ORIGINS incluye el dominio de la app.',
+      },
+      400,
+      env,
+      request,
+    );
+  }
+  const code = await codeForLink(target);
+  const stored = await readLink(`link:${code}`, env);
+  if (!stored) {
+    return json({ exists: false, code }, 404, env, request);
+  }
+  return json(
+    {
+      exists: true,
+      created: false,
+      code,
+      short: shortUrl(request, code),
+      expiresAt: stored.e,
+      ttlSeconds: ttlSeconds(env),
+    },
+    200,
+    env,
+    request,
+  );
+}
+
 export async function handleShorten(request: Request, env: Env): Promise<Response> {
   if (allowedOrigins(env).length === 0) {
     return json({ error: 'Falta configurar APP_ORIGINS en el Worker.' }, 500, env, request);
@@ -159,13 +221,36 @@ export async function handleShorten(request: Request, env: Env): Promise<Respons
   }
 
   const code = await codeForLink(target);
+  const key = `link:${code}`;
+  const existing = await readLink(key, env);
+  // Mismo contenido = mismo código: si ya existe, se reutiliza sin escribir
+  // (no se gasta cuota de KV ni se reinicia la caducidad).
+  if (existing) {
+    return json(
+      {
+        exists: true,
+        created: false,
+        code,
+        short: shortUrl(request, code),
+        expiresAt: existing.e,
+        ttlSeconds: ttlSeconds(env),
+      },
+      200,
+      env,
+      request,
+    );
+  }
+
   const ttl = ttlSeconds(env);
-  await env.LINKS.put(`link:${code}`, target, { expirationTtl: ttl });
   const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
+  const stored: StoredLink = { u: target, e: expiresAt };
+  await env.LINKS.put(key, JSON.stringify(stored), { expirationTtl: ttl });
   return json(
     {
+      exists: false,
+      created: true,
       code,
-      short: `${new URL(request.url).origin}/s/${code}`,
+      short: shortUrl(request, code),
       expiresAt,
       ttlSeconds: ttl,
     },
@@ -177,12 +262,12 @@ export async function handleShorten(request: Request, env: Env): Promise<Respons
 
 export async function handleRedirect(code: string, env: Env): Promise<Response> {
   if (!CODE_PATTERN.test(code)) return notFound(env);
-  const target = await env.LINKS.get(`link:${code}`);
-  if (!target) return notFound(env);
+  const stored = await readLink(`link:${code}`, env);
+  if (!stored) return notFound(env);
   return new Response(null, {
     status: 302,
     headers: {
-      Location: target,
+      Location: stored.u,
       'cache-control': 'no-store',
       'referrer-policy': 'no-referrer',
       'x-robots-tag': 'noindex',
@@ -209,6 +294,9 @@ export async function handle(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders(env, request) });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/shorten') {
+    return handleLookup(request, env);
   }
   if (request.method === 'POST' && url.pathname === '/api/shorten') {
     return handleShorten(request, env);
